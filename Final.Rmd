@@ -1,0 +1,231 @@
+---
+title: "Final Project"
+author: "Tsengee Sundui"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+library(stats)
+library(tseries)
+library(dplyr)
+library(ggplot2)
+library(xts)
+library(forecast)
+library(zoo)
+library(AICcmodavg)
+library(arfima)
+library(fracdiff)
+library(lmtest)
+```
+
+#### Initial data processing and some EDA was done in Python (separate file attached).
+
+#### Load the data:
+```{r}
+dataPath <- "C:/Users/sundu/OneDrive - The University of Chicago/Documents/Spring 2023/Time Series"
+df1 <- read.csv(paste(dataPath,'df_1.csv',sep = '/'))
+df2 <- read.csv(paste(dataPath,'df_2.csv',sep = '/'))
+df1$Date <- as.Date(df1$Date)
+df2$Date <- as.Date(df2$Date)
+head(df1)
+head(df2)
+```
+### Data properties and EDA
+Create TS objects:
+```{r}
+births_ts <- xts(df1$Live.births, order.by = df1$Date, frequency = 12)
+cbr_ts <- xts(df2$CBR, order.by = df2$Date)
+```
+
+```{r}
+acf(births_ts, lag = 100, main = "ACF - Live Births")
+acf(cbr_ts, lag = 100, main = "ACF - Crude Birth Rate")
+```
+Quantitatively:
+
+ADF p-value < 0.05: stationary
+KPSS p-value < 0.05: non-stationary
+
+This implies that the live births time series has a strong trend component that is not adequately captured by the ADF test.
+```{r}
+adf.test(births_ts)
+kpss.test(births_ts)
+```
+
+ADF p-value > 0.05: non-stationary
+KPSS p-value < 0.05: non-stationary
+```{r}
+adf.test(cbr_ts)
+kpss.test(cbr_ts)
+```
+
+```{r}
+ts_births <- ts(df1$Live.births, c(1981,01), c(2023, 2),12)
+ts_cbr <- ts(df2$CBR, c(2000,01), c(2023, 2), 12)
+```
+
+Decomposition
+```{r}
+decomposed <- decompose(ts_births)
+plot(decomposed)
+
+plot(decomposed$trend, main = "Trend Component")
+plot(decomposed$seasonal, main = "Seasonal Component")
+plot(decomposed$random, main = "Residual Component")
+```
+
+```{r}
+decomposed1 <- decompose(ts_cbr)
+plot(decomposed1)
+
+plot(decomposed1$trend, main = "Trend Component")
+plot(decomposed1$seasonal, main = "Seasonal Component")
+plot(decomposed1$random, main = "Residual Component")
+```
+
+```{r}
+boxplot(ts_births~cycle(ts_births),xlab="Date", ylab = "Live Births" ,main ="Monthly Births from 1981 - 2023")
+```
+```{r}
+boxplot(ts_cbr~cycle(ts_cbr),xlab="Date", ylab = "CBR" ,main ="Birth Rates from 2000 - 2023")
+```
+
+
+
+### From here on, I will only be looking at birth rates (CBR) and not live births
+### Split data into train and test 
+```{r}
+train <- window(ts_cbr, start=c(2000, 1), end=c(2021, 12))
+test <- window(ts_cbr, start=c(2022, 1), end=c(2023, 2))
+#train <- cbr_ts["1981-01/2021-12"]
+#test <- cbr_ts["2022-01/2023-02"]
+```
+
+### Let's try out some models:
+
+#### ARIMA
+```{r}
+m_arima <- auto.arima(train, seasonal = FALSE)
+summary(m_arima)
+f_arima <- forecast(m_arima, h=length(test))
+plot(f_arima)
+```
+
+#### SARIMA
+```{r}
+model_seasonal <- auto.arima(train, seasonal = TRUE)
+summary(model_seasonal)
+f_sarima <- forecast(model_seasonal, h=length(test))
+plot(f_sarima)
+```
+
+#### ARFIMA
+```{r}
+d <- fracdiff(train)
+st <- diffseries(train,d$d) 
+
+m_arfima <- auto.arima(st)
+summary(m_arfima)
+f_arfima <- forecast(m_arfima, h=14)
+plot(f_arfima)
+```
+
+#### Dynamic Regression
+```{r}
+ts_marriages <- ts(df2$Crude.Marriage.Rate, c(2000,01), c(2021, 12),12)
+ts_div <- ts(df2$Crude.Divorce.Rate, c(2000,01), c(2021, 12),12)
+
+#Simple linear regression
+lin_mod <- lm(train ~ ts_marriages+ts_div)
+summary(lin_mod)
+res <- lin_mod$residuals
+#acf(res, lag = 100) 
+#there's autocorrelation
+
+#Arima model
+arima_model <- auto.arima(train)
+arima_residuals <- residuals(arima_model)
+#summary(arma_res)
+dynamic_reg_model <- lm(train ~ ts_marriages + ts_div + arima_residuals)
+summary(dynamic_reg_model)
+AIC(dynamic_reg_model)
+```
+
+
+#### BSTS
+```{r}
+library(bsts)
+```
+
+
+```{r}
+ss1 <- AddLocalLinearTrend(list(), train)
+model1 <- bsts(train,
+               state.specification = ss1, niter = 1000)
+pred1 <- predict(model1, horizon = 14, newdata = test)
+plot(pred1, plot.original = 50)
+rmse1 <- sqrt(mean((pred1$mean - test)^2))
+rmse1
+```
+
+```{r}
+ss2 <- AddLocalLevel(list(), train)
+#ss2 <- AddLocalLinearTrend(ss2, train)
+ss2 <- AddSeasonal(ss2, train, nseasons = 4, season.duration = 3)
+model2 <- bsts(train,
+               state.specification = ss2, niter = 1000)
+pred2 <- predict(model2, horizon = 14, newdata = test)
+plot(pred2, plot.original = 50)
+rmse2 <- sqrt(mean((pred2$mean - test)^2))
+rmse2
+```
+
+### Chosen Model: SARIMA
+#### Results
+```{r}
+summary(model_seasonal)
+plot(f_sarima)
+fitted_values <- fitted(model_seasonal)
+plot(train, main = "Crude Birth Rate with Fitted SARIMA Values", ylab = "Value", xlab = "Time")
+lines(fitted_values, col = "red")
+```
+
+```{r}
+residuals <- residuals(model_seasonal)
+acf(residuals, lag = 100)
+pacf(residuals, lag = 100)
+# Perform the Ljung-Box test
+Box.test(residuals, lag = 12, type = "Ljung-Box")
+
+plot(residuals, type = "l", main = "Residuals of ARIMA(2,1,2)(0,1,2)[12]")
+
+qqnorm(residuals)
+qqline(residuals)
+```
+No autocorrelation in the residuals
+
+
+```{r}
+accuracy(f_sarima, test)
+```
+```{r}
+forecasts <- forecast(model_seasonal, h=36)
+plot(forecasts)
+```
+
+#### For future exploration 
+```{r}
+dataPath <- "C:/Users/sundu/OneDrive - The University of Chicago/Documents/Spring 2023/Time Series"
+sejong <- read.csv(paste(dataPath,'sejong.csv',sep = '/'))
+sejong$Date <- as.Date(sejong$Date)
+head(sejong)
+ts_sejong <- ts(sejong$CBR, c(2012,08), c(2023, 2), 12)
+```
+```{r}
+model_sejong <- auto.arima(ts_sejong, seasonal = TRUE)
+summary(model_sejong)
+f_sejong <- forecast(model_sejong, h=12)
+plot(f_sejong)
+```
